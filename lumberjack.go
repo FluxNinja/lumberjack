@@ -1,3 +1,10 @@
+// Package lumberjack provides a rolling logger.
+//
+// Note that this is v2.0 of lumberjack, and should be imported using gopkg.in
+// thusly:
+//
+//   import "gopkg.in/natefinch/lumberjack.v2"
+//
 // The package name remains simply lumberjack, and the code resides at
 // https://github.com/natefinch/lumberjack under the v2.0 branch.
 //
@@ -104,8 +111,18 @@ type Logger struct {
 	file *os.File
 	mu   sync.Mutex
 
-	millCh    chan bool
-	startMill sync.Once
+	wg     *sync.WaitGroup
+	millCh chan struct{}
+
+	// notifyCompressed is only set and used for tests. It is signalled when
+	// millRunOnce compresses some files. If no files are compressed,
+	// notifyCompressed is not signalled.
+	notifyCompressed chan struct{}
+
+	// notifyRemoved is only set and used for tests. It is signalled when the
+	// millRunOnce method removes some old log files. If no files are removed,
+	// notifyRemoved is not signalled.
+	notifyRemoved chan struct{}
 }
 
 var (
@@ -113,7 +130,7 @@ var (
 	currentTime = time.Now
 
 	// os_Stat exists so it can be mocked out by tests.
-	osStat = os.Stat
+	os_Stat = os.Stat
 
 	// megabyte is the conversion factor between MaxSize and bytes.  It is a
 	// variable so tests can mock it out and not need to write megabytes of data
@@ -158,7 +175,17 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 func (l *Logger) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.close()
+	if err := l.close(); err != nil {
+		close(l.millCh)
+		return err
+	}
+	if l.millCh != nil {
+		close(l.millCh)
+		l.wg.Wait()
+		l.millCh = nil
+		l.wg = nil
+	}
+	return nil
 }
 
 // close closes the file if it is open.
@@ -206,7 +233,7 @@ func (l *Logger) openNew() error {
 
 	name := l.filename()
 	mode := os.FileMode(0600)
-	info, err := osStat(name)
+	info, err := os_Stat(name)
 	if err == nil {
 		// Copy the mode off the old logfile.
 		mode = info.Mode()
@@ -258,7 +285,7 @@ func (l *Logger) openExistingOrNew(writeLen int) error {
 	l.mill()
 
 	filename := l.filename()
-	info, err := osStat(filename)
+	info, err := os_Stat(filename)
 	if os.IsNotExist(err) {
 		return l.openNew()
 	}
@@ -347,20 +374,30 @@ func (l *Logger) millRunOnce() error {
 		}
 	}
 
+	filesRemoved := false
 	for _, f := range remove {
 		errRemove := os.Remove(filepath.Join(l.dir(), f.Name()))
 		if err == nil && errRemove != nil {
 			err = errRemove
 		}
+		filesRemoved = true
 	}
+	if filesRemoved && l.notifyRemoved != nil {
+		l.notifyRemoved <- struct{}{}
+	}
+
+	filesCompressed := false
 	for _, f := range compress {
 		fn := filepath.Join(l.dir(), f.Name())
 		errCompress := compressLogFile(fn, fn+compressSuffix)
 		if err == nil && errCompress != nil {
 			err = errCompress
 		}
+		filesCompressed = true
 	}
-
+	if filesCompressed && l.notifyCompressed != nil {
+		l.notifyCompressed <- struct{}{}
+	}
 	return err
 }
 
@@ -376,12 +413,18 @@ func (l *Logger) millRun() {
 // mill performs post-rotation compression and removal of stale log files,
 // starting the mill goroutine if necessary.
 func (l *Logger) mill() {
-	l.startMill.Do(func() {
-		l.millCh = make(chan bool, 1)
-		go l.millRun()
-	})
+	// It is safe to check the millCh here as we are inside the mutex lock.
+	if l.millCh == nil {
+		l.millCh = make(chan struct{}, 1)
+		l.wg = &sync.WaitGroup{}
+		l.wg.Add(1)
+		go func() {
+			l.millRun()
+			l.wg.Done()
+		}()
+	}
 	select {
-	case l.millCh <- true:
+	case l.millCh <- struct{}{}:
 	default:
 	}
 }
@@ -463,7 +506,7 @@ func compressLogFile(src, dst string) (err error) {
 	}
 	defer f.Close()
 
-	fi, err := osStat(src)
+	fi, err := os_Stat(src)
 	if err != nil {
 		return fmt.Errorf("failed to stat log file: %v", err)
 	}
