@@ -1,5 +1,5 @@
-//go:build linux
-// +build linux
+//go:build linux || darwin
+// +build linux darwin
 
 package lumberjack
 
@@ -50,10 +50,10 @@ func TestMaintainMode(t *testing.T) {
 func TestMaintainOwner(t *testing.T) {
 	fakeFS := newFakeFS()
 	osChown = fakeFS.Chown
-	os_Stat = fakeFS.Stat
+	osStat = fakeFS.Stat
 	defer func() {
 		osChown = os.Chown
-		os_Stat = os.Stat
+		osStat = os.Stat
 	}()
 	currentTime = fakeTime
 	dir := makeTempDir("TestMaintainOwner", t)
@@ -98,13 +98,12 @@ func TestCompressMaintainMode(t *testing.T) {
 	isNil(err, t)
 	f.Close()
 
-	notify := make(chan struct{})
 	l := &Logger{
 		Compress:         true,
 		Filename:         filename,
 		MaxBackups:       1,
 		MaxSize:          100, // megabytes
-		notifyCompressed: notify,
+		notifyCompressed: make(chan struct{}),
 	}
 	defer l.Close()
 	b := []byte("boo!")
@@ -133,10 +132,10 @@ func TestCompressMaintainMode(t *testing.T) {
 func TestCompressMaintainOwner(t *testing.T) {
 	fakeFS := newFakeFS()
 	osChown = fakeFS.Chown
-	os_Stat = fakeFS.Stat
+	osStat = fakeFS.Stat
 	defer func() {
 		osChown = os.Chown
-		os_Stat = os.Stat
+		osStat = os.Stat
 	}()
 	currentTime = fakeTime
 	dir := makeTempDir("TestCompressMaintainOwner", t)
@@ -148,13 +147,12 @@ func TestCompressMaintainOwner(t *testing.T) {
 	isNil(err, t)
 	f.Close()
 
-	notify := make(chan struct{})
 	l := &Logger{
 		Compress:         true,
 		Filename:         filename,
 		MaxBackups:       1,
 		MaxSize:          100, // megabytes
-		notifyCompressed: notify,
+		notifyCompressed: make(chan struct{}),
 	}
 	defer l.Close()
 	b := []byte("boo!")
