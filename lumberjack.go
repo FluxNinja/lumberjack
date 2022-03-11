@@ -111,18 +111,15 @@ type Logger struct {
 	file *os.File
 	mu   sync.Mutex
 
-	wg     *sync.WaitGroup
+	// millCh is signalled to tell mill to compress/remove old log files.
 	millCh chan struct{}
+	// millShutdownCh is signalled when mill has shutdown completely.
+	millShutdownCh chan struct{}
 
-	// notifyCompressed is only set and used for tests. It is signalled when
-	// millRunOnce compresses some files. If no files are compressed,
-	// notifyCompressed is not signalled.
-	notifyCompressed chan struct{}
-
-	// notifyRemoved is only set and used for tests. It is signalled when the
-	// millRunOnce method removes some old log files. If no files are removed,
-	// notifyRemoved is not signalled.
+	// notifyRemoved is signalled when one or more files are removed. Used only for testing.
 	notifyRemoved chan struct{}
+	// notifyCompressed is signalled when a file is compressed. Used only for testing.
+	notifyCompressed chan struct{}
 }
 
 var (
@@ -130,7 +127,7 @@ var (
 	currentTime = time.Now
 
 	// os_Stat exists so it can be mocked out by tests.
-	os_Stat = os.Stat
+	osStat = os.Stat
 
 	// megabyte is the conversion factor between MaxSize and bytes.  It is a
 	// variable so tests can mock it out and not need to write megabytes of data
@@ -175,17 +172,15 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 func (l *Logger) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if err := l.close(); err != nil {
-		close(l.millCh)
-		return err
-	}
+
 	if l.millCh != nil {
 		close(l.millCh)
-		l.wg.Wait()
+		<-l.millShutdownCh
 		l.millCh = nil
-		l.wg = nil
+		l.millShutdownCh = nil
 	}
-	return nil
+
+	return l.close()
 }
 
 // close closes the file if it is open.
@@ -233,7 +228,7 @@ func (l *Logger) openNew() error {
 
 	name := l.filename()
 	mode := os.FileMode(0600)
-	info, err := os_Stat(name)
+	info, err := osStat(name)
 	if err == nil {
 		// Copy the mode off the old logfile.
 		mode = info.Mode()
@@ -243,7 +238,7 @@ func (l *Logger) openNew() error {
 			return fmt.Errorf("can't rename log file: %s", err)
 		}
 
-		// this is a no-op anywhere but linux
+		// this is a no-op anywhere but linux or darwin
 		if err := chown(name, info); err != nil {
 			return err
 		}
@@ -285,7 +280,7 @@ func (l *Logger) openExistingOrNew(writeLen int) error {
 	l.mill()
 
 	filename := l.filename()
-	info, err := os_Stat(filename)
+	info, err := osStat(filename)
 	if os.IsNotExist(err) {
 		return l.openNew()
 	}
@@ -398,6 +393,7 @@ func (l *Logger) millRunOnce() error {
 	if filesCompressed && l.notifyCompressed != nil {
 		l.notifyCompressed <- struct{}{}
 	}
+
 	return err
 }
 
@@ -408,20 +404,17 @@ func (l *Logger) millRun() {
 		// what am I going to do, log this?
 		_ = l.millRunOnce()
 	}
+	l.millShutdownCh <- struct{}{}
 }
 
 // mill performs post-rotation compression and removal of stale log files,
 // starting the mill goroutine if necessary.
 func (l *Logger) mill() {
-	// It is safe to check the millCh here as we are inside the mutex lock.
+	// We're inside the mutex, so it's okay to access millCh.
 	if l.millCh == nil {
 		l.millCh = make(chan struct{}, 1)
-		l.wg = &sync.WaitGroup{}
-		l.wg.Add(1)
-		go func() {
-			l.millRun()
-			l.wg.Done()
-		}()
+		l.millShutdownCh = make(chan struct{}, 1)
+		go l.millRun()
 	}
 	select {
 	case l.millCh <- struct{}{}:
@@ -506,7 +499,7 @@ func compressLogFile(src, dst string) (err error) {
 	}
 	defer f.Close()
 
-	fi, err := os_Stat(src)
+	fi, err := osStat(src)
 	if err != nil {
 		return fmt.Errorf("failed to stat log file: %v", err)
 	}
