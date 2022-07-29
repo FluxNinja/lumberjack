@@ -1,4 +1,4 @@
-module github.com/FluxNinja/lumberjack
+module github.com/fluxninja/lumberjack
 
 require (
 	github.com/BurntSushi/toml v0.3.1
